@@ -1,90 +1,265 @@
-# Jitdor Telegram Identity Provider (IdP)
+# Telegram Identity Provider (IdP)
 
-A self-hosted **OAuth 2.0 / OpenID Connect** identity provider that uses **Telegram** as the authentication method. Users scan a **QR code** with their Telegram app and approve the login inside Telegram – no passwords needed.
-
-## Table of Contents
-
-- [Features](#features)
-- [How It Works](#how-it-works)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-  - [Environment Variables](#environment-variables)
-  - [Generating Persistent Keys](#generating-persistent-keys)
-- [Registering OAuth Clients](#registering-oauth-clients)
-  - [Client Registration Script](#client-registration-script)
-  - [Confidential vs Public Clients](#confidential-vs-public-clients)
-  - [First-Party vs Third-Party Clients](#first-party-vs-third-party-clients)
-- [Deployment](#deployment)
-  - [Using Caddy for Automatic HTTPS](#using-caddy-for-automatic-https)
-  - [Behind a Reverse Proxy](#behind-a-reverse-proxy)
-  - [Running with Systemd](#running-with-systemd)
-- [OAuth 2.0 / OIDC Usage](#oauth-20--oidc-usage)
-  - [Authorization Code Flow with PKCE](#authorization-code-flow-with-pkce)
-  - [Token Exchange](#token-exchange)
-  - [Userinfo Endpoint](#userinfo-endpoint)
-  - [OIDC Discovery](#oidc-discovery)
-- [Conditional Authentication Policies](#conditional-authentication-policies)
-  - [Policy Format](#policy-format)
-  - [Available Conditions](#available-conditions)
-  - [Example Policies](#example-policies)
-- [Consent & Auto-Approval](#consent--auto-approval)
-- [Security Considerations](#security-considerations)
-- [Database Schema](#database-schema)
-- [Roadmap / Known Limitations](#roadmap--known-limitations)
-- [License](#license)
-
----
+A self-hosted **OAuth 2.0 / OpenID Connect** identity provider that uses **Telegram** for authentication. Users scan a QR code with their Telegram app and approve the login inside Telegram – no passwords required.
 
 ## Features
 
-- **QR code login** via Telegram bot deep link – user scans with phone, approves inside Telegram.
-- **OAuth 2.0 Authorization Code flow with PKCE** (required for all clients).
-- **OpenID Connect** support: discovery, JWKS, `/userinfo`.
-- **Conditional authentication policies** evaluated before consent:
-  - User ID allow/deny lists
-  - Username regex matching
-  - Telegram group membership (any, all, or specific group with optional role)
-  - Telegram Premium status
-  - Language code filtering
-  - Logical AND/OR/NOT combinations
-- **Persistent RSA signing keys** stored on disk (no key regeneration on restart).
-- **Access tokens typed as `at+jwt`** – ID tokens cannot be used as access tokens.
-- **DB-backed authorization codes** – single-use, expiration, and automatic cleanup.
-- **Consent management** – first-time approval, optional auto-approval for trusted first-party clients.
-- **Confidential client support** – client secret hashing and constant-time verification.
-- **SQLite storage** (easily swappable for PostgreSQL/MySQL with minor changes).
-- **Caddy** integration for automatic HTTPS.
-
----
-
-## How It Works
-
-1. Third-party app redirects user to `/authorize` with OAuth parameters.
-2. IdP renders a QR code containing a Telegram deep link (`https://t.me/<bot>?start=auth_<token>`).
-3. User scans the QR code using the Telegram app.
-4. Bot validates the auth request, evaluates any client-specific policies (e.g., group membership), and asks the user to approve or deny (unless auto-approval applies).
-5. If approved, the auth request status changes to `approved` and the browser receives an authorization code.
-6. The third-party app exchanges the code for tokens at `/token` (with PKCE).
-7. Tokens are validated by the app or used to call `/userinfo`.
-
----
+- QR code login via Telegram bot deep link
+- OAuth 2.0 Authorization Code flow with PKCE (required)
+- OpenID Connect discovery, JWKS, and `/userinfo`
+- Conditional authentication policies (group membership, user ID lists, username regex, Premium status, language, logical operators)
+- Persistent RSA signing keys (stored on disk, safe across restarts)
+- Access tokens typed as `at+jwt` (ID tokens cannot be used as access tokens)
+- DB‑backed authorization codes (single‑use, expiring, cleaned up)
+- Consent management (per‑scope) with optional auto‑approval for first‑party clients
+- Support for confidential clients (client secret hashing, constant‑time compare)
+- SQLite storage (easy to swap)
+- Caddy / reverse proxy friendly
 
 ## Requirements
 
-- **Node.js** 18+ (or 20+ recommended)
-- **npm** 9+
-- **A Telegram bot** created via [@BotFather](https://t.me/BotFather)
-- **A publicly reachable HTTPS domain** (or a tunnel like ngrok for testing)
-- **Caddy** (optional but recommended for automatic TLS)
-- **SQLite** (built-in via `better-sqlite3`)
-
----
+- Node.js 18+
+- npm 9+
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Public HTTPS URL (or ngrok for local testing)
+- Caddy (optional)
 
 ## Installation
 
 1. Clone the repository:
-
    ```bash
    git clone https://github.com/your-username/telegram-idp.git
    cd telegram-idp
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Copy `.env.example` to `.env` and fill in your values:
+   ```bash
+   cp .env.example .env
+   ```
+
+4. Register an OAuth client:
+   ```bash
+   npm run register-client
+   ```
+
+5. Start the server:
+   ```bash
+   npm start
+   ```
+   The server will automatically set the Telegram webhook and generate persistent RSA keys (in `keys/`).
+
+## Configuration
+
+Edit the `.env` file:
+
+| Variable                | Description                                      | Default                 |
+|-------------------------|--------------------------------------------------|-------------------------|
+| `PORT`                  | HTTP port                                        | `3000`                  |
+| `BASE_URL`              | Public HTTPS base URL (issuer, webhook)          | `http://localhost:3000` |
+| `TELEGRAM_BOT_TOKEN`    | Your bot token                                   | *(required)*            |
+| `TELEGRAM_WEBHOOK_SECRET`| Secret to verify Telegram webhook updates       | `change-me`             |
+| `DB_PATH`               | SQLite database file                             | `./data.db`             |
+| `KEYS_DIR`              | Directory for RSA key pair                       | `./keys`                |
+
+On first start, the server creates `private.pem` (mode 0600) and `public.pem` in `KEYS_DIR`. **Back these up.** If you delete them, all issued tokens become invalid.
+
+## Registering OAuth Clients
+
+Run `npm run register-client` and answer the prompts:
+
+- **Client ID**: unique identifier
+- **Client name**: shown to users
+- **Redirect URIs**: comma‑separated list
+- **Client secret**: optional; leave blank for public clients (SPA/mobile)
+- **Policy file**: optional path to a JSON policy file
+
+The script stores a SHA‑256 hash of the secret (if provided) and marks the client as **third‑party** (`is_first_party = 0`). This means users will always be asked to approve, even if they have consented before.
+
+**To enable auto‑approval for your own trusted apps**, set:
+
+```sql
+UPDATE oauth_clients SET is_first_party = 1 WHERE client_id = 'your-app';
+```
+
+This skips the consent prompt after the first approval. Use with caution – it reduces phishing protection.
+
+## Deployment
+
+### Caddy
+
+Use the provided `Caddyfile`:
+
+```
+telegram-idp.example.com {
+    reverse_proxy localhost:3000
+}
+```
+
+### Reverse proxy (Nginx example)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name telegram-idp.example.com;
+    # ... TLS config ...
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Ensure `BASE_URL` matches the public URL exactly.
+
+### Systemd
+
+Create `/etc/systemd/system/telegram-idp.service`:
+
+```ini
+[Unit]
+Description=Telegram Identity Provider
+After=network.target
+
+[Service]
+Type=simple
+User=telegram-idp
+WorkingDirectory=/opt/telegram-idp
+EnvironmentFile=/opt/telegram-idp/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+
+```bash
+sudo systemctl enable telegram-idp
+sudo systemctl start telegram-idp
+```
+
+## OAuth 2.0 / OIDC Usage
+
+### Authorization request
+
+```
+GET /authorize
+    ?client_id=YOUR_CLIENT_ID
+    &redirect_uri=https://yourapp.example.com/callback
+    &response_type=code
+    &scope=openid%20profile%20telegram
+    &state=xyz123
+    &code_challenge=BASE64URL(SHA256(code_verifier))
+    &code_challenge_method=S256
+```
+
+The user scans the QR code and approves. The browser is redirected to `redirect_uri?code=...&state=...`.
+
+### Token exchange
+
+```bash
+curl -X POST https://telegram-idp.example.com/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "authorization_code",
+    "code": "AUTH_CODE",
+    "redirect_uri": "https://yourapp.example.com/callback",
+    "client_id": "YOUR_CLIENT_ID",
+    "code_verifier": "YOUR_PKCE_VERIFIER"
+  }'
+```
+
+If the client is confidential, include `"client_secret": "..."`.
+
+Response:
+
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "id_token": "eyJ..."
+}
+```
+
+### Userinfo
+
+```bash
+curl https://telegram-idp.example.com/userinfo \
+  -H "Authorization: Bearer ACCESS_TOKEN"
+```
+
+### Discovery
+
+- `/.well-known/openid-configuration`
+- `/jwks`
+
+## Conditional Authentication Policies
+
+Policies are stored per client as JSON. They are evaluated before consent.
+
+### Available conditions
+
+| Type                  | Description                          | Parameters                          |
+|-----------------------|--------------------------------------|-------------------------------------|
+| `user_id_in_list`     | Telegram ID in list                  | `user_ids`: array                   |
+| `user_id_not_in_list` | Telegram ID not in list              | `user_ids`: array                   |
+| `username_matches`    | Username matches regex               | `pattern`: string                   |
+| `group_membership`    | Member of a group                    | `chat_id`: int, `role` (optional)   |
+| `any_group_membership`| Member of at least one group         | `chat_ids`: array, `role` (optional)|
+| `all_group_membership`| Member of all groups                 | `chat_ids`: array, `role` (optional)|
+| `is_premium`          | Has Telegram Premium                 | `value`: boolean                    |
+| `language_code_in`    | Language code in list                | `codes`: array                      |
+
+Operators: `and`, `or`, `not`.
+
+### Example policies
+
+**Allow only specific users:**
+```json
+{ "type": "user_id_in_list", "user_ids": [123456789] }
+```
+
+**Require membership in a group (supergroup ID is negative):**
+```json
+{ "type": "group_membership", "chat_id": -1001234567890, "role": "member" }
+```
+
+**Premium OR admin of a group:**
+```json
+{
+  "operator": "or",
+  "conditions": [
+    { "type": "is_premium", "value": true },
+    { "type": "group_membership", "chat_id": -1003333333333, "role": "administrator" }
+  ]
+}
+```
+
+## Security Notes
+
+- PKCE mandatory
+- Redirect URIs validated exactly
+- Auth request tokens short‑lived, single‑use, bound to browser session
+- Telegram webhook protected by secret header
+- Private key file mode 0600; read errors (except ENOENT) crash server to avoid silent key regeneration
+- Client secret comparison is constant‑time; single `invalid_client` error
+- Access tokens carry `typ: at+jwt`; `/userinfo` verifies issuer and type
+- Authorization codes stored in DB, marked used immediately, cleaned up periodically
+
+## Known Limitations
+
+- No refresh tokens (sessions last 15 minutes)
+- No automated tests yet
+- Multi‑instance requires shared filesystem for keys and a shared DB
+
+## License
+
+MIT
