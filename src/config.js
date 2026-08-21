@@ -11,4 +11,5 @@ export const config = {
   accessTokenTtl: '15m',
   idTokenTtl: '15m',
   authRequestTtl: 120, // seconds
+  refreshTokenTtl: '30d',
 };

@@ -1,10 +1,14 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
 
-const db = new Database(config.dbPath);
-db.pragma('journal_mode = WAL');
+export function createDatabase(dbPath) {
+  const db = new DatabaseSync(dbPath);
 
-db.exec(`
+  if (dbPath !== ':memory:') {
+    db.exec('PRAGMA journal_mode = WAL');
+  }
+
+  db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER UNIQUE NOT NULL,
@@ -20,9 +24,9 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   client_id TEXT PRIMARY KEY,
   client_secret_hash TEXT,
   name TEXT NOT NULL,
-  redirect_uris TEXT NOT NULL, -- JSON array
+  redirect_uris TEXT NOT NULL,
   allowed_scopes TEXT NOT NULL DEFAULT '["openid","profile","telegram"]',
-  policy TEXT, -- JSON policy or NULL
+  policy TEXT,
   is_first_party INTEGER NOT NULL DEFAULT 0
 );
 
@@ -61,6 +65,20 @@ CREATE TABLE IF NOT EXISTS authorization_codes (
   FOREIGN KEY(client_id) REFERENCES oauth_clients(client_id)
 );
 
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT UNIQUE NOT NULL,
+  user_id INTEGER NOT NULL,
+  client_id TEXT NOT NULL,
+  scope TEXT,
+  expires_at INTEGER NOT NULL,
+  rotated_at INTEGER,
+  revoked_at INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(client_id) REFERENCES oauth_clients(client_id)
+);
+
 CREATE TABLE IF NOT EXISTS consents (
   user_id INTEGER NOT NULL,
   client_id TEXT NOT NULL,
@@ -72,4 +90,14 @@ CREATE TABLE IF NOT EXISTS consents (
 );
 `);
 
+  // Migration: ensure is_first_party column exists for old DBs
+  const tableInfo = db.prepare("PRAGMA table_info(oauth_clients)").all();
+  if (!tableInfo.some(col => col.name === 'is_first_party')) {
+    db.exec("ALTER TABLE oauth_clients ADD COLUMN is_first_party INTEGER NOT NULL DEFAULT 0");
+  }
+
+  return db;
+}
+
+const db = createDatabase(config.dbPath);
 export default db;

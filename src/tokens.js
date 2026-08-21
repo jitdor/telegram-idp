@@ -1,6 +1,6 @@
 import { SignJWT, generateKeyPair, exportJWK, importPKCS8, importSPKI, exportPKCS8, exportSPKI } from 'jose';
 import { config } from './config.js';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { access, readFile, writeFile, mkdir } from 'fs/promises';
 import path from 'path';
 
 let keyPairPromise;
@@ -11,7 +11,12 @@ async function loadOrCreateKeyPair() {
   const privateKeyPath = path.join(keysDir, 'private.pem');
   const publicKeyPath = path.join(keysDir, 'public.pem');
 
-  try {
+  const [privateExists, publicExists] = await Promise.all([
+    access(privateKeyPath).then(() => true).catch(() => false),
+    access(publicKeyPath).then(() => true).catch(() => false),
+  ]);
+
+  if (privateExists && publicExists) {
     const [privatePem, publicPem] = await Promise.all([
       readFile(privateKeyPath, 'utf8'),
       readFile(publicKeyPath, 'utf8'),
@@ -19,11 +24,9 @@ async function loadOrCreateKeyPair() {
     const privateKey = await importPKCS8(privatePem, 'RS256');
     const publicKey = await importSPKI(publicPem, 'RS256');
     return { privateKey, publicKey };
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      // Do not overwrite existing key on read errors; crash instead.
-      throw err;
-    }
+  }
+
+  if (!privateExists && !publicExists) {
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const privatePem = await exportPKCS8(privateKey);
     const publicPem = await exportSPKI(publicKey);
@@ -33,7 +36,10 @@ async function loadOrCreateKeyPair() {
     ]);
     return { privateKey, publicKey };
   }
+
+  throw new Error('Incomplete key pair: both private.pem and public.pem must exist together.');
 }
+
 export function getKeyPair() {
   if (!keyPairPromise) {
     keyPairPromise = loadOrCreateKeyPair();

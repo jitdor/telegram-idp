@@ -7,8 +7,10 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 const clientId = await rl.question('Client ID: ');
 const name = await rl.question('Client name: ');
 const redirectUris = await rl.question('Redirect URIs (comma separated): ');
-const scopes = 'openid profile telegram';
+const scopes = 'openid profile telegram offline_access';
 const clientSecret = await rl.question('Client secret (optional, press Enter for public client): ');
+const isFirstPartyInput = await rl.question('Is this a first-party client? (y/N): ');
+const isFirstParty = isFirstPartyInput.trim().toLowerCase() === 'y' ? 1 : 0;
 const policyFile = await rl.question('Path to policy JSON file (optional, press Enter to skip): ');
 
 let policy = null;
@@ -23,8 +25,8 @@ if (policyFile.trim()) {
 
 const secretHash = clientSecret.trim() ? crypto.createHash('sha256').update(clientSecret.trim()).digest('hex') : null;
 
-db.prepare('INSERT OR REPLACE INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, allowed_scopes, policy) VALUES (?, ?, ?, ?, ?, ?)')
-  .run(clientId, secretHash, name, JSON.stringify(redirectUris.split(',').map(s => s.trim())), scopes, policy ? JSON.stringify(policy) : null);
+db.prepare('INSERT OR REPLACE INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, allowed_scopes, policy, is_first_party) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  .run(clientId, secretHash, name, JSON.stringify(redirectUris.split(',').map(s => s.trim())), scopes, policy ? JSON.stringify(policy) : null, isFirstParty);
 
 console.log('Client registered successfully.');
 rl.close();
