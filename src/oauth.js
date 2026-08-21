@@ -37,8 +37,12 @@ export function approveAuthRequest(id, telegramUser) {
   const authRequest = getAuthRequestById(id);
   if (!authRequest || authRequest.status !== 'pending') return null;
 
-  db.prepare('INSERT OR IGNORE INTO consents (user_id, client_id, scope) VALUES (?, ?, ?)')
-    .run(user.id, authRequest.client_id, authRequest.scope);
+  // Store consent per scope
+  const scopes = (authRequest.scope || '').split(/\s+/).filter(Boolean);
+  const insertConsent = db.prepare('INSERT OR IGNORE INTO consents (user_id, client_id, scope) VALUES (?, ?, ?)');
+  for (const s of scopes) {
+    insertConsent.run(user.id, authRequest.client_id, s);
+  }
   db.prepare('UPDATE auth_requests SET status = ?, user_id = ? WHERE id = ?').run('approved', user.id, id);
   createAuthorizationCode(id, user.id);
   return user;
@@ -78,13 +82,14 @@ export function createAuthorizationCode(authRequestId, userId) {
 export function consumeAuthorizationCode(code, redirectUri, clientId, codeVerifier) {
   const row = db.prepare('SELECT * FROM authorization_codes WHERE code = ? AND used = 0').get(code);
   if (!row) return null;
+  // Mark as used immediately to prevent reuse regardless of outcome
+  db.prepare('UPDATE authorization_codes SET used = 1 WHERE code = ?').run(code);
   if (row.expires_at < Date.now()) return null;
   if (row.redirect_uri !== redirectUri || row.client_id !== clientId) return null;
   if (row.code_challenge) {
     const expected = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     if (expected !== row.code_challenge) return null;
   }
-  db.prepare('UPDATE authorization_codes SET used = 1 WHERE code = ?').run(code);
   return {
     userId: row.user_id,
     clientId: row.client_id,
@@ -95,8 +100,13 @@ export function consumeAuthorizationCode(code, redirectUri, clientId, codeVerifi
     nonce: row.nonce,
   };
 }
-
-export function hasConsent(userId, clientId, scope) {
-  const row = db.prepare('SELECT 1 FROM consents WHERE user_id = ? AND client_id = ? AND scope = ?').get(userId, clientId, scope);
-  return !!row;
+export function hasConsent(userId, clientId, requestedScope) {
+  const scopes = (requestedScope || '').split(/\s+/).filter(Boolean);
+  if (scopes.length === 0) return true;
+  const stmt = db.prepare('SELECT 1 FROM consents WHERE user_id = ? AND client_id = ? AND scope = ?');
+  for (const s of scopes) {
+    const row = stmt.get(userId, clientId, s);
+    if (!row) return false;
+  }
+  return true;
 }

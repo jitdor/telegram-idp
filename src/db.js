@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   name TEXT NOT NULL,
   redirect_uris TEXT NOT NULL, -- JSON array
   allowed_scopes TEXT NOT NULL DEFAULT '["openid","profile","telegram"]',
-  policy TEXT -- JSON policy or NULL
+  policy TEXT, -- JSON policy or NULL
+  is_first_party INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS auth_requests (

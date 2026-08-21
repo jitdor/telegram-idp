@@ -125,14 +125,18 @@ app.post('/token', async (req, reply) => {
   const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body;
   if (grant_type !== 'authorization_code') return reply.code(400).send({ error: 'unsupported_grant_type' });
 
-  // Check if client requires a secret
+  // Check client and secret (constant-time, no enumeration)
   const client = db.prepare('SELECT client_secret_hash FROM oauth_clients WHERE client_id = ?').get(client_id);
-  if (!client) return reply.code(400).send({ error: 'invalid_client' });
-  if (client.client_secret_hash) {
+  if (!client) return reply.code(401).send({ error: 'invalid_client' });
+  const expectedHash = client.client_secret_hash;
+  if (expectedHash) {
     const { client_secret } = req.body;
-    if (!client_secret) return reply.code(400).send({ error: 'client_secret_required' });
-    const hash = crypto.createHash('sha256').update(client_secret).digest('hex');
-    if (hash !== client.client_secret_hash) return reply.code(400).send({ error: 'invalid_client_secret' });
+    if (!client_secret) return reply.code(401).send({ error: 'invalid_client' });
+    const providedHash = crypto.createHash('sha256').update(client_secret).digest();
+    const expectedBuffer = Buffer.from(expectedHash, 'hex');
+    if (providedHash.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedHash, expectedBuffer)) {
+      return reply.code(401).send({ error: 'invalid_client' });
+    }
   }
 
   const data = consumeAuthorizationCode(code, redirect_uri, client_id, code_verifier);
@@ -197,6 +201,13 @@ const start = async () => {
   await bot.api.setWebhook(webhookUrl, { secret_token: config.telegramWebhookSecret });
   app.log.info(`Webhook set to ${webhookUrl}`);
   await app.listen({ port: config.port, host: '0.0.0.0' });
+
+  // Periodic cleanup of expired/used codes and auth_requests
+  setInterval(() => {
+    const now = Date.now();
+    db.prepare('DELETE FROM authorization_codes WHERE expires_at < ? OR used = 1').run(now);
+    db.prepare('DELETE FROM auth_requests WHERE expires_at < ? OR status IN (?, ?)').run(now, 'denied', 'approved');
+  }, 60_000).unref();
 };
 
 start().catch((err) => {

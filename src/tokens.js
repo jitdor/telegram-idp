@@ -20,17 +20,20 @@ async function loadOrCreateKeyPair() {
     const publicKey = await importSPKI(publicPem, 'RS256');
     return { privateKey, publicKey };
   } catch (err) {
+    if (err.code !== 'ENOENT') {
+      // Do not overwrite existing key on read errors; crash instead.
+      throw err;
+    }
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const privatePem = await exportPKCS8(privateKey);
     const publicPem = await exportSPKI(publicKey);
     await Promise.all([
-      writeFile(privateKeyPath, privatePem),
-      writeFile(publicKeyPath, publicPem),
+      writeFile(privateKeyPath, privatePem, { mode: 0o600 }),
+      writeFile(publicKeyPath, publicPem, { mode: 0o644 }),
     ]);
     return { privateKey, publicKey };
   }
 }
-
 export function getKeyPair() {
   if (!keyPairPromise) {
     keyPairPromise = loadOrCreateKeyPair();

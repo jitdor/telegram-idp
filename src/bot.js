@@ -27,12 +27,22 @@ bot.command('start', async (ctx) => {
       return ctx.reply(`❌ You do not meet the requirements to sign in: ${result.reason || 'policy denied'}`);
     }
 
-    // Check if user already consented to this client+scope; auto-approve
-    const existingConsent = hasConsent(ctx.from.id, authRequest.client_id, authRequest.scope);
+    // Look up internal user ID
+    let internalUser = db.prepare('SELECT * FROM users WHERE telegram_user_id = ?').get(ctx.from.id);
+    if (!internalUser) {
+      // User not yet in DB; they will be created upon approval
+      internalUser = { id: null };
+    }
+
+    // Determine if client is first-party and user has existing consent
+    const clientRow = db.prepare('SELECT is_first_party FROM oauth_clients WHERE client_id = ?').get(authRequest.client_id);
+    const isFirstParty = clientRow && clientRow.is_first_party === 1;
+    const existingConsent = isFirstParty && internalUser.id && hasConsent(internalUser.id, authRequest.client_id, authRequest.scope);
+
     if (existingConsent) {
       const approvedUser = await approveAuthRequest(authRequest.id, ctx.from);
       if (approvedUser) {
-        await ctx.reply('✅ Auto‑approved (previous consent found). You can return to your browser.');
+        await ctx.reply(`✅ Auto‑approved for trusted client **${authRequest.client_id}** (previous consent found). You can return to your browser.`);
         return;
       }
       return ctx.reply('❌ Unable to auto‑approve. Please try again.');
