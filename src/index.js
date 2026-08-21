@@ -111,8 +111,11 @@ app.get('/auth-request/:id/status', async (req, reply) => {
     return reply.code(404).send({ status: 'invalid' });
   }
   if (authRequest.status === 'approved') {
-    const code = createAuthorizationCode(id, authRequest.user_id);
-    return { status: 'approved', redirect_uri: authRequest.redirect_uri, state: authRequest.state, code };
+    // Fetch the (single) authorization code from DB
+    const codeRow = db.prepare('SELECT code FROM authorization_codes WHERE auth_request_id = ? AND used = 0').get(id);
+    if (codeRow) {
+      return { status: 'approved', redirect_uri: authRequest.redirect_uri, state: authRequest.state, code: codeRow.code };
+    }
   }
   return { status: authRequest.status, reason: authRequest.reason || undefined };
 });
@@ -121,6 +124,16 @@ app.get('/auth-request/:id/status', async (req, reply) => {
 app.post('/token', async (req, reply) => {
   const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body;
   if (grant_type !== 'authorization_code') return reply.code(400).send({ error: 'unsupported_grant_type' });
+
+  // Check if client requires a secret
+  const client = db.prepare('SELECT client_secret_hash FROM oauth_clients WHERE client_id = ?').get(client_id);
+  if (!client) return reply.code(400).send({ error: 'invalid_client' });
+  if (client.client_secret_hash) {
+    const { client_secret } = req.body;
+    if (!client_secret) return reply.code(400).send({ error: 'client_secret_required' });
+    const hash = crypto.createHash('sha256').update(client_secret).digest('hex');
+    if (hash !== client.client_secret_hash) return reply.code(400).send({ error: 'invalid_client_secret' });
+  }
 
   const data = consumeAuthorizationCode(code, redirect_uri, client_id, code_verifier);
   if (!data) return reply.code(400).send({ error: 'invalid_grant' });
@@ -146,7 +159,10 @@ app.get('/userinfo', async (req, reply) => {
   const token = authHeader.slice(7);
   try {
     const { publicKey } = await getKeyPair();
-    const { payload } = await jwtVerify(token, publicKey);
+    const { payload, protectedHeader } = await jwtVerify(token, publicKey, {
+      issuer: config.baseUrl,
+    });
+    if (protectedHeader.typ !== 'at+jwt') throw new Error('invalid token type');
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.sub);
     if (!user) return reply.code(404).send({ error: 'user_not_found' });
     return {

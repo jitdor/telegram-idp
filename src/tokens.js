@@ -1,14 +1,41 @@
-import { SignJWT, generateKeyPair, exportJWK } from 'jose';
+import { SignJWT, generateKeyPair, exportJWK, importPKCS8, importSPKI, exportPKCS8, exportSPKI } from 'jose';
 import { config } from './config.js';
+import { readFile, writeFile, mkdir } from 'fs/promises';
+import path from 'path';
 
-let keyPair;
+let keyPairPromise;
 
-export async function getKeyPair() {
-  if (!keyPair) {
-    // In production, load a persistent key from env/secret manager
-    keyPair = await generateKeyPair('RS256');
+async function loadOrCreateKeyPair() {
+  const keysDir = config.keysDir || './keys';
+  await mkdir(keysDir, { recursive: true });
+  const privateKeyPath = path.join(keysDir, 'private.pem');
+  const publicKeyPath = path.join(keysDir, 'public.pem');
+
+  try {
+    const [privatePem, publicPem] = await Promise.all([
+      readFile(privateKeyPath, 'utf8'),
+      readFile(publicKeyPath, 'utf8'),
+    ]);
+    const privateKey = await importPKCS8(privatePem, 'RS256');
+    const publicKey = await importSPKI(publicPem, 'RS256');
+    return { privateKey, publicKey };
+  } catch (err) {
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const privatePem = await exportPKCS8(privateKey);
+    const publicPem = await exportSPKI(publicKey);
+    await Promise.all([
+      writeFile(privateKeyPath, privatePem),
+      writeFile(publicKeyPath, publicPem),
+    ]);
+    return { privateKey, publicKey };
   }
-  return keyPair;
+}
+
+export function getKeyPair() {
+  if (!keyPairPromise) {
+    keyPairPromise = loadOrCreateKeyPair();
+  }
+  return keyPairPromise;
 }
 
 export async function createAccessToken(user, clientId, scope) {
@@ -19,7 +46,7 @@ export async function createAccessToken(user, clientId, scope) {
     telegram_id: user.telegram_user_id,
     username: user.telegram_username,
   })
-    .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+    .setProtectedHeader({ alg: 'RS256', typ: 'at+jwt' })
     .setSubject(user.id.toString())
     .setIssuer(config.baseUrl)
     .setAudience(clientId)
@@ -38,7 +65,7 @@ export async function createIdToken(user, clientId, nonce) {
   };
   if (nonce) claims.nonce = nonce;
   return new SignJWT(claims)
-    .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+    .setProtectedHeader({ alg: 'RS256' })
     .setSubject(user.id.toString())
     .setIssuer(config.baseUrl)
     .setAudience(clientId)

@@ -7,6 +7,7 @@ export const config = {
   telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || 'change-me',
   jwtSecret: new TextEncoder().encode(process.env.JWT_SECRET || 'dev-secret-change-me'),
   dbPath: process.env.DB_PATH || './data.db',
+  keysDir: process.env.KEYS_DIR || './keys',
   accessTokenTtl: '15m',
   idTokenTtl: '15m',
   authRequestTtl: 120, // seconds

@@ -40,6 +40,7 @@ export function approveAuthRequest(id, telegramUser) {
   db.prepare('INSERT OR IGNORE INTO consents (user_id, client_id, scope) VALUES (?, ?, ?)')
     .run(user.id, authRequest.client_id, authRequest.scope);
   db.prepare('UPDATE auth_requests SET status = ?, user_id = ? WHERE id = ?').run('approved', user.id, id);
+  createAuthorizationCode(id, user.id);
   return user;
 }
 
@@ -50,42 +51,52 @@ export function denyAuthRequest(id, reason = null) {
   return true;
 }
 
-// ---- Authorization code store (in-memory for MVP; use DB/Redis in production) ----
-const authorizationCodes = new Map();
+// ---- Authorization code store (DB-backed) ----
 
 export function createAuthorizationCode(authRequestId, userId) {
   const authRequest = getAuthRequestById(authRequestId);
   const code = randomToken(32);
-  authorizationCodes.set(code, {
-    userId,
-    clientId: authRequest.client_id,
-    redirectUri: authRequest.redirect_uri,
-    codeChallenge: authRequest.code_challenge,
-    codeChallengeMethod: authRequest.code_challenge_method,
-    scope: authRequest.scope,
-    nonce: authRequest.nonce,
-    expiresAt: Date.now() + 60_000,
-  });
+  const expiresAt = Date.now() + 60_000;
+  db.prepare(`INSERT INTO authorization_codes
+    (code, auth_request_id, user_id, client_id, redirect_uri, code_challenge, code_challenge_method, scope, nonce, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(
+      code,
+      authRequestId,
+      userId,
+      authRequest.client_id,
+      authRequest.redirect_uri,
+      authRequest.code_challenge,
+      authRequest.code_challenge_method,
+      authRequest.scope,
+      authRequest.nonce,
+      expiresAt
+    );
   return code;
 }
 
 export function consumeAuthorizationCode(code, redirectUri, clientId, codeVerifier) {
-  const data = authorizationCodes.get(code);
-  if (!data) return null;
-  authorizationCodes.delete(code);
-  if (data.expiresAt < Date.now()) return null;
-  if (data.redirectUri !== redirectUri || data.clientId !== clientId) return null;
-  if (data.codeChallenge) {
+  const row = db.prepare('SELECT * FROM authorization_codes WHERE code = ? AND used = 0').get(code);
+  if (!row) return null;
+  if (row.expires_at < Date.now()) return null;
+  if (row.redirect_uri !== redirectUri || row.client_id !== clientId) return null;
+  if (row.code_challenge) {
     const expected = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    if (expected !== data.codeChallenge) return null;
+    if (expected !== row.code_challenge) return null;
   }
-  return data;
+  db.prepare('UPDATE authorization_codes SET used = 1 WHERE code = ?').run(code);
+  return {
+    userId: row.user_id,
+    clientId: row.client_id,
+    redirectUri: row.redirect_uri,
+    codeChallenge: row.code_challenge,
+    codeChallengeMethod: row.code_challenge_method,
+    scope: row.scope,
+    nonce: row.nonce,
+  };
 }
 
-// Cleanup expired codes
-setInterval(() => {
-  const now = Date.now();
-  for (const [code, data] of authorizationCodes) {
-    if (data.expiresAt < now) authorizationCodes.delete(code);
-  }
-}, 60_000).unref();
+export function hasConsent(userId, clientId, scope) {
+  const row = db.prepare('SELECT 1 FROM consents WHERE user_id = ? AND client_id = ? AND scope = ?').get(userId, clientId, scope);
+  return !!row;
+}

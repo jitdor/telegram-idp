@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS auth_requests (
   FOREIGN KEY(user_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS authorization_codes (
+  code TEXT PRIMARY KEY,
+  auth_request_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT,
+  code_challenge_method TEXT,
+  scope TEXT,
+  nonce TEXT,
+  expires_at INTEGER NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(client_id) REFERENCES oauth_clients(client_id)
+);
+
 CREATE TABLE IF NOT EXISTS consents (
   user_id INTEGER NOT NULL,
   client_id TEXT NOT NULL,

@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { config } from './config.js';
-import { getAuthRequestByToken, approveAuthRequest, denyAuthRequest } from './oauth.js';
+import { getAuthRequestByToken, approveAuthRequest, denyAuthRequest, hasConsent } from './oauth.js';
 import { evaluatePolicy } from './policy.js';
 import db from './db.js';
 
@@ -25,6 +25,17 @@ bot.command('start', async (ctx) => {
       // Deny the auth request
       denyAuthRequest(authRequest.id, result.reason || 'Policy evaluation failed');
       return ctx.reply(`❌ You do not meet the requirements to sign in: ${result.reason || 'policy denied'}`);
+    }
+
+    // Check if user already consented to this client+scope; auto-approve
+    const existingConsent = hasConsent(ctx.from.id, authRequest.client_id, authRequest.scope);
+    if (existingConsent) {
+      const approvedUser = await approveAuthRequest(authRequest.id, ctx.from);
+      if (approvedUser) {
+        await ctx.reply('✅ Auto‑approved (previous consent found). You can return to your browser.');
+        return;
+      }
+      return ctx.reply('❌ Unable to auto‑approve. Please try again.');
     }
 
     // Policy passed – show consent
