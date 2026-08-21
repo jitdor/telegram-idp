@@ -1,0 +1,3 @@
+telegram-idp.example.com {
+    reverse_proxy localhost:3000
+}
