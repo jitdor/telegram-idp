@@ -86,7 +86,10 @@ test('refresh may narrow but not widen scope', async () => {
 });
 
 test('with a grace window, a concurrent double refresh fails without logging the user out', async () => {
-  const idp = await createTestIdp({ config: { refreshReuseGraceSeconds: 10 } });
+  const logs = [];
+  const record = (level) => (obj, msg) => logs.push({ level, msg, ...obj });
+  const logger = { info: record('info'), warn: record('warn'), error: record('error') };
+  const idp = await createTestIdp({ config: { refreshReuseGraceSeconds: 10 }, logger });
   await addClient(idp.ctx);
   const first = await loginAndExchange(idp);
   const results = await Promise.all([refreshGrant(idp.app, first.refresh_token), refreshGrant(idp.app, first.refresh_token)]);
@@ -94,9 +97,16 @@ test('with a grace window, a concurrent double refresh fails without logging the
   assert.equal(ok.length, 1);
   // The winner's successor survives the race…
   assert.equal((await refreshGrant(idp.app, ok[0].json().refresh_token)).statusCode, 200);
-  // …but a replay after the window is still treated as theft.
+  // The race is logged at info, distinguishable from a theft signal.
+  assert.deepEqual(logs.map((l) => l.level), ['info']);
+  assert.match(logs[0].msg, /grace window/);
+  assert.equal(logs[0].clientId, 'test-client');
+
+  // …but a replay after the window is still treated as theft, and logged as such.
   idp.clock.advance(11);
   assert.equal((await refreshGrant(idp.app, first.refresh_token)).statusCode, 400);
+  assert.equal(logs.at(-1).level, 'warn');
+  assert.match(logs.at(-1).msg, /reuse detected/);
 });
 
 test('policy is re-evaluated on refresh: leaving the group ends the session', async () => {

@@ -427,7 +427,6 @@ export function createOAuthService(ctx) {
     const presented = body.refresh_token;
     if (typeof presented !== 'string' || !presented) throw invalidRequest('refresh_token is required');
     const hash = sha256Hex(presented);
-    const now = clock.now();
 
     // Validate a requested scope before rotating, so a bad request does not
     // consume an otherwise valid token. (Read-only; rotation below is still atomic.)
@@ -442,6 +441,10 @@ export function createOAuthService(ctx) {
     }
 
     const outcome = store.transaction(() => {
+      // Read the clock inside the transaction: rotation times and the grace
+      // comparison must be ordered with the writes they guard (matters if the
+      // store ever becomes asynchronous and transactions can wait on a lock).
+      const now = clock.now();
       if (store.markRefreshTokenRotated(hash, client.clientId, now)) {
         const row = store.getRefreshTokenByHash(hash);
         const next = issueRefreshToken({
@@ -455,7 +458,8 @@ export function createOAuthService(ctx) {
         // Within the grace window a replay is treated as a benign concurrent
         // refresh: it fails, but the successor issued moments ago survives.
         // Nothing is ever issued for a rotated token, so the window cannot mint tokens.
-        if (now - row.rotated_at < config.refreshReuseGraceSeconds) return { raced: true };
+        const age = now - row.rotated_at;
+        if (age < config.refreshReuseGraceSeconds) return { raced: { userId: row.user_id, secondsSinceRotation: age } };
         const revoked = store.revokeRefreshTokensForGrant(row.user_id, row.client_id, now);
         return { reuse: { userId: row.user_id, revoked } };
       }
@@ -466,7 +470,13 @@ export function createOAuthService(ctx) {
       logger.warn({ clientId: client.clientId, ...outcome.reuse }, 'refresh token reuse detected; grant revoked');
       throw invalidGrant('Refresh token has already been used');
     }
-    if (outcome.raced) throw invalidGrant('Refresh token was just rotated by a concurrent request');
+    if (outcome.raced) {
+      // Logged at info, not warn: distinguishes an honest client racing itself
+      // from the reuse (theft) signal above.
+      logger.info({ clientId: client.clientId, ...outcome.raced },
+        'refresh token replayed within grace window; treated as concurrent refresh, grant kept');
+      throw invalidGrant('Refresh token was just rotated by a concurrent request');
+    }
     if (!outcome.row) throw invalidGrant('Invalid refresh token');
     const { row, next } = outcome;
     const scope = requestedScope ?? row.scope;
@@ -476,7 +486,7 @@ export function createOAuthService(ctx) {
     if (config.reevaluatePolicyOnRefresh && client.policy) {
       const result = await evaluatePolicy(client.policy, subjectFromUser(user), ctx.telegram);
       if (!result.pass) {
-        store.revokeRefreshTokensForGrant(user.id, client.clientId, now);
+        store.revokeRefreshTokensForGrant(user.id, client.clientId, clock.now());
         throw invalidGrant('The user no longer satisfies this application\'s access policy');
       }
     }
