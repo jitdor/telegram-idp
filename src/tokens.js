@@ -1,90 +1,116 @@
-import { SignJWT, generateKeyPair, exportJWK, importPKCS8, importSPKI, exportPKCS8, exportSPKI } from 'jose';
-import { config } from './config.js';
-import { access, readFile, writeFile, mkdir } from 'fs/promises';
-import path from 'path';
+import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
+import { randomToken } from './util.js';
+import { invalidToken } from './errors.js';
 
-let keyPairPromise;
+/** @typedef {import('./types.js').User} User */
+/** @typedef {import('./types.js').KeyStore} KeyStore */
+/** @typedef {ReturnType<typeof createTokenService>} TokenService */
 
-async function loadOrCreateKeyPair() {
-  const keysDir = config.keysDir || './keys';
-  await mkdir(keysDir, { recursive: true });
-  const privateKeyPath = path.join(keysDir, 'private.pem');
-  const publicKeyPath = path.join(keysDir, 'public.pem');
-
-  const [privateExists, publicExists] = await Promise.all([
-    access(privateKeyPath).then(() => true).catch(() => false),
-    access(publicKeyPath).then(() => true).catch(() => false),
-  ]);
-
-  if (privateExists && publicExists) {
-    const [privatePem, publicPem] = await Promise.all([
-      readFile(privateKeyPath, 'utf8'),
-      readFile(publicKeyPath, 'utf8'),
-    ]);
-    const privateKey = await importPKCS8(privatePem, 'RS256');
-    const publicKey = await importSPKI(publicPem, 'RS256');
-    return { privateKey, publicKey };
+/**
+ * Claims derived from the user profile, filtered by granted scope.
+ * @param {User} user
+ * @param {string[]} scopes
+ */
+export function profileClaims(user, scopes) {
+  /** @type {Record<string, unknown>} */
+  const claims = {};
+  if (scopes.includes('profile')) {
+    const name = [user.first_name, user.last_name].filter(Boolean).join(' ');
+    if (name) claims.name = name;
+    if (user.first_name) claims.given_name = user.first_name;
+    if (user.last_name) claims.family_name = user.last_name;
+    if (user.telegram_username) claims.preferred_username = user.telegram_username;
+    if (user.photo_url) claims.picture = user.photo_url;
+    if (user.language_code) claims.locale = user.language_code;
   }
-
-  if (!privateExists && !publicExists) {
-    const { privateKey, publicKey } = await generateKeyPair('RS256');
-    const privatePem = await exportPKCS8(privateKey);
-    const publicPem = await exportSPKI(publicKey);
-    await Promise.all([
-      writeFile(privateKeyPath, privatePem, { mode: 0o600 }),
-      writeFile(publicKeyPath, publicPem, { mode: 0o644 }),
-    ]);
-    return { privateKey, publicKey };
+  if (scopes.includes('telegram')) {
+    claims.telegram_id = user.telegram_user_id;
+    claims.telegram_is_premium = user.is_premium === 1;
   }
-
-  throw new Error('Incomplete key pair: both private.pem and public.pem must exist together.');
+  return claims;
 }
 
-export function getKeyPair() {
-  if (!keyPairPromise) {
-    keyPairPromise = loadOrCreateKeyPair();
+/**
+ * JWT issuance and verification, bound to one issuer and key store.
+ * @param {{ config: import('./types.js').IdpConfig, keys: KeyStore, clock: import('./types.js').Clock }} deps
+ */
+export function createTokenService({ config, keys, clock }) {
+  const issuer = config.issuer;
+  /** Audience the IdP's own resource (userinfo, introspection) requires. */
+  const resourceAudience = `${issuer}/userinfo`;
+
+  async function sign(claims, typ, ttl) {
+    const { kid, alg, privateKey } = await keys.getSigningKey();
+    const iat = clock.now();
+    const jwt = new SignJWT(claims)
+      .setProtectedHeader({ alg, kid, ...(typ ? { typ } : {}) })
+      .setIssuer(issuer)
+      .setIssuedAt(iat)
+      .setExpirationTime(iat + ttl);
+    return { jwt: await jwt.sign(privateKey), iat, exp: iat + ttl };
   }
-  return keyPairPromise;
-}
 
-export async function createAccessToken(user, clientId, scope) {
-  const { privateKey } = await getKeyPair();
-  return new SignJWT({
-    scope,
-    client_id: clientId,
-    telegram_id: user.telegram_user_id,
-    username: user.telegram_username,
-  })
-    .setProtectedHeader({ alg: 'RS256', typ: 'at+jwt' })
-    .setSubject(user.id.toString())
-    .setIssuer(config.baseUrl)
-    .setAudience(clientId)
-    .setIssuedAt()
-    .setExpirationTime(config.accessTokenTtl)
-    .sign(privateKey);
-}
+  return {
+    resourceAudience,
 
-export async function createIdToken(user, clientId, nonce) {
-  const { privateKey } = await getKeyPair();
-  const claims = {
-    telegram_id: user.telegram_user_id,
-    preferred_username: user.telegram_username,
-    name: [user.first_name, user.last_name].filter(Boolean).join(' '),
-    picture: user.photo_url,
+    /**
+     * RFC 9068 access token. The audience names both the IdP resource (so
+     * `/userinfo` can require it) and the client (for backwards compatibility).
+     * @param {{ user: User, clientId: string, scope: string, authTime?: number | null }} p
+     */
+    async issueAccessToken({ user, clientId, scope, authTime }) {
+      const jti = randomToken(16);
+      const { jwt, exp } = await sign({
+        sub: String(user.id),
+        aud: [resourceAudience, clientId],
+        client_id: clientId,
+        scope,
+        jti,
+        ...(authTime ? { auth_time: authTime } : {}),
+      }, 'at+jwt', config.accessTokenTtl);
+      return { token: jwt, jti, exp, expiresIn: config.accessTokenTtl };
+    },
+
+    /**
+     * @param {{ user: User, clientId: string, scopes: string[], nonce?: string | null, authTime?: number | null }} p
+     */
+    async issueIdToken({ user, clientId, scopes, nonce, authTime }) {
+      const { jwt } = await sign({
+        sub: String(user.id),
+        aud: clientId,
+        azp: clientId,
+        ...(nonce ? { nonce } : {}),
+        ...(authTime ? { auth_time: authTime } : {}),
+        ...profileClaims(user, scopes),
+      }, null, config.idTokenTtl);
+      return jwt;
+    },
+
+    /**
+     * Verify an access token minted by this IdP: signature (by `kid`), RS256
+     * only, `typ: at+jwt`, issuer, audience and expiry.
+     * @param {string} token
+     */
+    async verifyAccessToken(token) {
+      try {
+        const { payload } = await jwtVerify(token, async (header) => {
+          const key = await keys.getVerificationKey(header.kid);
+          if (!key) throw new joseErrors.JWKSNoMatchingKey();
+          return key;
+        }, {
+          issuer,
+          audience: resourceAudience,
+          typ: 'at+jwt',
+          algorithms: ['RS256'],
+          currentDate: new Date(clock.now() * 1000),
+          requiredClaims: ['sub', 'client_id', 'jti', 'exp', 'iat'],
+        });
+        return payload;
+      } catch {
+        throw invalidToken();
+      }
+    },
+
+    getJwks: () => keys.getJwks(),
   };
-  if (nonce) claims.nonce = nonce;
-  return new SignJWT(claims)
-    .setProtectedHeader({ alg: 'RS256' })
-    .setSubject(user.id.toString())
-    .setIssuer(config.baseUrl)
-    .setAudience(clientId)
-    .setIssuedAt()
-    .setExpirationTime(config.idTokenTtl)
-    .sign(privateKey);
-}
-
-export async function getJwks() {
-  const { publicKey } = await getKeyPair();
-  const jwk = await exportJWK(publicKey);
-  return { keys: [jwk] };
 }
