@@ -48,7 +48,7 @@ test('introspection: own tokens only, reports active state', async () => {
   const at = (await postForm(idp.app, '/introspect', { token: tokens.access_token, client_id: 'test-client' })).json();
   assert.equal(at.active, true);
   assert.equal(at.client_id, 'test-client');
-  assert.equal(at.scope, 'openid profile telegram');
+  assert.equal(at.scope, 'openid profile telegram offline_access');
   assert.equal(at.telegram_id, 1001);
 
   const rt = (await postForm(idp.app, '/introspect', { token: tokens.refresh_token, client_id: 'test-client' })).json();

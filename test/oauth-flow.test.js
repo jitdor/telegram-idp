@@ -21,7 +21,7 @@ test('end-to-end: authorize → Telegram approval → code → tokens → userin
   assert.equal(body.token_type, 'Bearer');
   assert.equal(body.expires_in, 900);
   assert.equal(body.scope, 'openid profile telegram');
-  assert.ok(body.refresh_token);
+  assert.equal(body.refresh_token, undefined, 'no offline_access, no refresh token');
 
   const idToken = decodeJwt(body.id_token);
   assert.equal(idToken.nonce, 'n-1');
@@ -46,6 +46,17 @@ test('end-to-end: authorize → Telegram approval → code → tokens → userin
     telegram_id: 1001,
     telegram_is_premium: false,
   });
+});
+
+test('refresh tokens require offline_access unless configured to always issue', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx);
+  const withOffline = await login(idp, { scope: 'openid offline_access' });
+  assert.ok((await exchangeCode(idp.app, withOffline)).json().refresh_token);
+
+  const always = await createTestIdp({ config: { issueRefreshTokens: 'always' } });
+  await addClient(always.ctx);
+  assert.ok((await exchangeCode(always.app, await login(always))).json().refresh_token);
 });
 
 test('token endpoint also accepts JSON bodies', async () => {

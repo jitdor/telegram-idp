@@ -3,10 +3,10 @@ import { parseDuration } from './util.js';
 /** @typedef {import('./types.js').IdpConfig} IdpConfig */
 /**
  * @typedef {Partial<Omit<IdpConfig, 'rateLimits' | 'accessTokenTtl' | 'idTokenTtl' | 'refreshTokenTtl'
- *   | 'authRequestTtl' | 'authCodeTtl'>> & {
+ *   | 'authRequestTtl' | 'authCodeTtl' | 'refreshReuseGraceSeconds'>> & {
  *   rateLimits?: Partial<import('./types.js').RateLimits>,
  *   accessTokenTtl?: number | string, idTokenTtl?: number | string, refreshTokenTtl?: number | string,
- *   authRequestTtl?: number | string, authCodeTtl?: number | string,
+ *   authRequestTtl?: number | string, authCodeTtl?: number | string, refreshReuseGraceSeconds?: number | string,
  * }} ConfigInput
  */
 
@@ -33,6 +33,8 @@ const DEFAULTS = {
   authCodeTtl: 60,
   trustProxy: false,
   reevaluatePolicyOnRefresh: true,
+  issueRefreshTokens: 'offline_access',
+  refreshReuseGraceSeconds: 0,
   rateLimits: { token: 30, authorize: 30, status: 120, introspect: 120, revoke: 60, userinfo: 120 },
 };
 
@@ -50,8 +52,12 @@ export function defineConfig(values = {}) {
     rateLimits: { ...DEFAULTS.rateLimits, ...stripUndefined(values.rateLimits || {}) },
   };
   merged.issuer = String(merged.issuer).replace(/\/+$/, '');
-  for (const key of ['accessTokenTtl', 'idTokenTtl', 'refreshTokenTtl', 'authRequestTtl', 'authCodeTtl']) {
+  for (const key of ['accessTokenTtl', 'idTokenTtl', 'refreshTokenTtl', 'authRequestTtl', 'authCodeTtl',
+    'refreshReuseGraceSeconds']) {
     merged[key] = parseDuration(merged[key]);
+  }
+  if (merged.issueRefreshTokens !== 'offline_access' && merged.issueRefreshTokens !== 'always') {
+    throw new Error(`issueRefreshTokens must be "offline_access" or "always", got ${merged.issueRefreshTokens}`);
   }
   Object.freeze(merged.rateLimits);
   return Object.freeze(merged);
@@ -79,6 +85,8 @@ export function loadConfig(env = process.env) {
     authCodeTtl: env.AUTH_CODE_TTL,
     trustProxy: bool(env.TRUST_PROXY),
     reevaluatePolicyOnRefresh: bool(env.REEVALUATE_POLICY_ON_REFRESH),
+    issueRefreshTokens: /** @type {any} */ (env.ISSUE_REFRESH_TOKENS || undefined),
+    refreshReuseGraceSeconds: env.REFRESH_REUSE_GRACE,
     rateLimits: {
       token: int(env.RATE_LIMIT_TOKEN),
       authorize: int(env.RATE_LIMIT_AUTHORIZE),

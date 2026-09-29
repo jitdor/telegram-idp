@@ -74,7 +74,7 @@ export function createOAuthService(ctx) {
     const clientId = single(query, 'client_id', UnsafeRedirectError);
     const redirectUri = single(query, 'redirect_uri', UnsafeRedirectError);
     const client = clientId ? store.getClient(clientId) : null;
-    if (!client) throw new UnsafeRedirectError('invalid_client', 'Unknown client_id');
+    if (!client) throw new UnsafeRedirectError('invalid_request', 'Unknown client_id');
     // Exact string match against the registered list (no normalization, no prefix matching).
     if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
       throw new UnsafeRedirectError('invalid_request', 'redirect_uri is not registered for this client');
@@ -355,7 +355,7 @@ export function createOAuthService(ctx) {
       token_type: 'Bearer',
       expires_in: access.expiresIn,
       scope,
-      refresh_token: refreshToken,
+      ...(refreshToken ? { refresh_token: refreshToken } : {}),
     };
     if (scopes.includes('openid')) {
       body.id_token = await tokens.issueIdToken({ user, clientId: client.clientId, scopes, nonce, authTime });
@@ -380,6 +380,12 @@ export function createOAuthService(ctx) {
     const now = clock.now();
     const row = store.getAuthorizationCode(code);
     if (!row) throw invalidGrant('Invalid authorization code');
+    // Deliberate trade-off: the code is burnt *before* the client binding,
+    // redirect_uri and PKCE checks. A code presented by the wrong client (or
+    // with a wrong verifier) is evidence it leaked, so it is never redeemable
+    // afterwards. The cost is that anyone holding a leaked code can deny the
+    // legitimate client its redemption; since codes only travel in the
+    // browser redirect, that attacker could already interfere with the login.
     if (!store.markCodeUsed(code, now)) {
       if (row.refresh_family_id) store.revokeRefreshFamily(row.refresh_family_id, now);
       if (row.access_token_jti) store.denylistAccessToken(row.access_token_jti, row.access_token_exp);
@@ -395,10 +401,15 @@ export function createOAuthService(ctx) {
 
     const user = store.getUser(row.user_id);
     if (!user) throw invalidGrant('User no longer exists');
-    const familyId = randomToken(16);
-    const refreshToken = issueRefreshToken({
-      familyId, userId: user.id, clientId: client.clientId, scope: row.scope, authTime: row.auth_time, now,
-    });
+    // By default a refresh token is only issued when offline_access was granted,
+    // so e.g. a SPA that never asked for one does not receive a 30-day credential.
+    const wantsRefresh = config.issueRefreshTokens === 'always' || splitScopes(row.scope).includes('offline_access');
+    const familyId = wantsRefresh ? randomToken(16) : null;
+    const refreshToken = wantsRefresh
+      ? issueRefreshToken({
+        familyId, userId: user.id, clientId: client.clientId, scope: row.scope, authTime: row.auth_time, now,
+      })
+      : undefined;
     const { body: response, access } = await tokenResponse({
       user, client, scope: row.scope, nonce: row.nonce, authTime: row.auth_time, refreshToken,
     });
@@ -418,6 +429,18 @@ export function createOAuthService(ctx) {
     const hash = sha256Hex(presented);
     const now = clock.now();
 
+    // Validate a requested scope before rotating, so a bad request does not
+    // consume an otherwise valid token. (Read-only; rotation below is still atomic.)
+    const current = store.getRefreshTokenByHash(hash);
+    let requestedScope = null;
+    if (body.scope !== undefined && current && current.client_id === client.clientId) {
+      const granted = splitScopes(current.scope);
+      const requested = splitScopes(/** @type {string} */ (body.scope));
+      const extra = requested.filter((s) => !granted.includes(s));
+      if (extra.length) throw new OAuthError('invalid_scope', `Scope exceeds the original grant: ${extra.join(' ')}`);
+      requestedScope = requested.join(' ');
+    }
+
     const outcome = store.transaction(() => {
       if (store.markRefreshTokenRotated(hash, client.clientId, now)) {
         const row = store.getRefreshTokenByHash(hash);
@@ -429,6 +452,10 @@ export function createOAuthService(ctx) {
       }
       const row = store.getRefreshTokenByHash(hash);
       if (row && row.client_id === client.clientId && row.rotated_at !== null && row.revoked_at === null) {
+        // Within the grace window a replay is treated as a benign concurrent
+        // refresh: it fails, but the successor issued moments ago survives.
+        // Nothing is ever issued for a rotated token, so the window cannot mint tokens.
+        if (now - row.rotated_at < config.refreshReuseGraceSeconds) return { raced: true };
         const revoked = store.revokeRefreshTokensForGrant(row.user_id, row.client_id, now);
         return { reuse: { userId: row.user_id, revoked } };
       }
@@ -439,17 +466,10 @@ export function createOAuthService(ctx) {
       logger.warn({ clientId: client.clientId, ...outcome.reuse }, 'refresh token reuse detected; grant revoked');
       throw invalidGrant('Refresh token has already been used');
     }
+    if (outcome.raced) throw invalidGrant('Refresh token was just rotated by a concurrent request');
     if (!outcome.row) throw invalidGrant('Invalid refresh token');
     const { row, next } = outcome;
-
-    const granted = splitScopes(row.scope);
-    let scope = row.scope;
-    if (body.scope !== undefined) {
-      const requested = splitScopes(/** @type {string} */ (body.scope));
-      const extra = requested.filter((s) => !granted.includes(s));
-      if (extra.length) throw new OAuthError('invalid_scope', `Scope exceeds the original grant: ${extra.join(' ')}`);
-      scope = requested.join(' ');
-    }
+    const scope = requestedScope ?? row.scope;
 
     const user = store.getUser(row.user_id);
     if (!user) throw invalidGrant('User no longer exists');
@@ -485,6 +505,17 @@ export function createOAuthService(ctx) {
   // ---------------------------------------------------------------------------
 
   /**
+   * Every scope the token carries is still consented, and was consented no
+   * later than the token was issued (so revoke + re-consent does not revive
+   * old tokens). Consent added later for *other* scopes does not matter.
+   */
+  function grantCovers(userId, clientId, scope, issuedAt) {
+    const consents = new Map(store.getConsents(userId, clientId).map((c) => [c.scope, c.granted_at]));
+    const scopes = splitScopes(scope);
+    return scopes.length > 0 && scopes.every((s) => consents.has(s) && consents.get(s) <= issuedAt);
+  }
+
+  /**
    * Beyond the signature: not revoked, user and client still exist, consent
    * still granted and not re-granted after the token was issued, and
    * (optionally) the client's policy still holds right now.
@@ -494,8 +525,9 @@ export function createOAuthService(ctx) {
     const user = store.getUser(payload.sub);
     const client = store.getClient(payload.client_id);
     if (!user || !client) return null;
-    const consents = store.getConsents(user.id, client.clientId);
-    if (consents.length === 0 || consents.some((c) => c.granted_at > payload.iat)) return null;
+    if (!grantCovers(user.id, client.clientId, /** @type {string} */ (payload.scope), /** @type {number} */ (payload.iat))) {
+      return null;
+    }
     if (checkPolicy && client.policy) {
       const result = await evaluatePolicy(client.policy, subjectFromUser(user), ctx.telegram);
       if (!result.pass) return null;
@@ -527,9 +559,8 @@ export function createOAuthService(ctx) {
 
     const rt = store.getRefreshTokenByHash(sha256Hex(presented));
     if (rt) {
-      const consents = store.getConsents(rt.user_id, rt.client_id);
       const active = rt.client_id === client.clientId && rt.revoked_at === null && rt.rotated_at === null
-        && rt.expires_at > now && consents.length > 0;
+        && rt.expires_at > now && store.getConsents(rt.user_id, rt.client_id).length > 0;
       if (!active) return inactive;
       return {
         active: true, token_type: 'refresh_token', client_id: rt.client_id, sub: String(rt.user_id),

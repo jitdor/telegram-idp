@@ -137,9 +137,9 @@ export async function refreshGrant(app, refreshToken, clientId = 'test-client', 
   return postForm(app, '/token', { grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId, ...extra });
 }
 
-/** Login + code exchange → token response body. */
+/** Login + code exchange → token response body. Asks for offline_access so a refresh token is issued. */
 export async function loginAndExchange(idp, opts = {}) {
-  const { code, verifier } = await login(idp, opts);
+  const { code, verifier } = await login(idp, { scope: 'openid profile telegram offline_access', ...opts });
   const res = await exchangeCode(idp.app, { code, verifier, clientId: opts.clientId });
   if (res.statusCode !== 200) throw new Error(`token exchange failed: ${res.body}`);
   return res.json();

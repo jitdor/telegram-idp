@@ -57,6 +57,8 @@ On start the server generates a signing key (in `KEYS_DIR`) if there is none, se
 | `AUTH_REQUEST_TTL`           | How long a QR code stays valid                                        | `2m`                    |
 | `AUTH_CODE_TTL`              | Authorization code lifetime                                           | `60s`                   |
 | `REEVALUATE_POLICY_ON_REFRESH` | Re-run the client policy on every refresh                           | `true`                  |
+| `ISSUE_REFRESH_TOKENS`       | `offline_access`: only when that scope is granted; `always`: on every code exchange | `offline_access` |
+| `REFRESH_REUSE_GRACE`        | Seconds during which replaying a just-rotated refresh token only fails instead of revoking the grant (`0` = strict) | `0` |
 | `TRUST_PROXY`                | Trust `X-Forwarded-*` (set behind Caddy/Nginx so rate limits see real IPs) | `false`            |
 | `RATE_LIMIT_TOKEN`, `RATE_LIMIT_AUTHORIZE`, `RATE_LIMIT_STATUS`, `RATE_LIMIT_USERINFO`, `RATE_LIMIT_INTROSPECT`, `RATE_LIMIT_REVOKE` | Requests per minute per IP (`0` disables) | `30`, `30`, `120`, `120`, `120`, `60` |
 
@@ -111,7 +113,7 @@ GET /authorize
     &code_challenge_method=S256
 ```
 
-- `redirect_uri` must match a registered URI **exactly** (string comparison). An unknown client or unregistered redirect URI renders an error page; nothing is redirected to an unverified URI.
+- `redirect_uri` must match a registered URI **exactly** (string comparison). An unknown `client_id` or unregistered redirect URI renders an `invalid_request` error page; nothing is redirected to an unverified URI.
 - All other errors (`unsupported_response_type`, `invalid_request` for missing/invalid PKCE, `invalid_scope`, `login_required` for `prompt=none`) are redirected to the client as `?error=…&error_description=…&state=…&iss=…`.
 - Requested scopes must be within the client's `allowed_scopes`. Without `scope`, `openid profile telegram` (intersected with the allowed scopes) is used.
 - On success the browser is redirected to `redirect_uri?code=…&state=…&iss=…` (`iss` per RFC 9207). If the user denies, or fails the client's policy, it is redirected with `error=access_denied`.
@@ -138,7 +140,11 @@ curl -X POST https://telegram-idp.example.com/token \
 }
 ```
 
-A refresh token is issued on every code exchange (regardless of `offline_access`). Refresh with `grant_type=refresh_token&refresh_token=…` (optionally `scope=` to narrow). Each use **rotates** the token; presenting an already-rotated token is treated as theft and revokes every refresh token of that user/client pair — this includes two concurrent refreshes of the same token, so clients must serialize refreshes. An authorization code can be exchanged once; replaying it revokes the tokens it produced.
+A refresh token is issued only when the `offline_access` scope was requested and granted (set `ISSUE_REFRESH_TOKENS=always` for the previous behaviour). Refresh with `grant_type=refresh_token&refresh_token=…` (optionally `scope=` to narrow; asking for a wider scope fails with `invalid_scope` without consuming the token).
+
+Each use **rotates** the token. Presenting an already-rotated token is treated as theft and revokes every refresh token of that user/client pair. By default this is strict: two concurrent refreshes of the same token also count, so clients must serialize refreshes or the user is logged out. `REFRESH_REUSE_GRACE=<seconds>` relaxes this for buggy-but-honest clients: a replay within that window just fails with `invalid_grant` (it never yields tokens) and the successor survives; later replays still revoke the grant.
+
+An authorization code can be exchanged once; replaying it revokes the tokens it produced. A code is burnt on *any* presentation after lookup — including by the wrong client or with a wrong PKCE verifier — so a leaked code is never redeemable afterwards (at the cost that its holder can prevent the legitimate redemption).
 
 Errors are JSON `{ "error": "…", "error_description": "…" }` with RFC 6749 codes, `Cache-Control: no-store`.
 
@@ -202,7 +208,7 @@ Operators: `and`, `or` (`conditions`: array), `not` (`condition`). Unknown types
 
 ## Consent
 
-Approving a login records consent for exactly the requested scopes. For **first-party** clients (`--first-party`) a later login that asks for no more than was consented to is approved without a prompt; third-party clients always prompt. In the bot, `/apps` lists the apps a user has granted access to, with revoke buttons, and `/revoke <client_id>` does the same. Revoking deletes the consent and all refresh tokens; outstanding access tokens stop passing `/userinfo` and `/introspect` immediately.
+Approving a login records consent for exactly the requested scopes. An access token stays valid for `/userinfo`/`/introspect` only while every scope it carries is still consented, and was consented no later than the token was issued; consenting to additional scopes later does not affect existing tokens. For **first-party** clients (`--first-party`) a later login that asks for no more than was consented to is approved without a prompt; third-party clients always prompt. In the bot, `/apps` lists the apps a user has granted access to, with revoke buttons, and `/revoke <client_id>` does the same. Revoking deletes the consent and all refresh tokens; outstanding access tokens stop passing `/userinfo` and `/introspect` immediately.
 
 ## Embedding as a library
 

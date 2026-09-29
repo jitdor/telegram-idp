@@ -75,12 +75,28 @@ test('refresh tokens expire', async () => {
 test('refresh may narrow but not widen scope', async () => {
   const idp = await createTestIdp();
   await addClient(idp.ctx);
-  const first = await loginAndExchange(idp, { scope: 'openid profile' });
+  const first = await loginAndExchange(idp, { scope: 'openid profile offline_access' });
   const narrowed = await refreshGrant(idp.app, first.refresh_token, 'test-client', { scope: 'openid' });
   assert.equal(narrowed.statusCode, 200);
   assert.equal(narrowed.json().scope, 'openid');
   const widened = await refreshGrant(idp.app, narrowed.json().refresh_token, 'test-client', { scope: 'openid telegram' });
   assert.equal(widened.json().error, 'invalid_scope');
+  // The rejected request did not consume the token.
+  assert.equal((await refreshGrant(idp.app, narrowed.json().refresh_token)).statusCode, 200);
+});
+
+test('with a grace window, a concurrent double refresh fails without logging the user out', async () => {
+  const idp = await createTestIdp({ config: { refreshReuseGraceSeconds: 10 } });
+  await addClient(idp.ctx);
+  const first = await loginAndExchange(idp);
+  const results = await Promise.all([refreshGrant(idp.app, first.refresh_token), refreshGrant(idp.app, first.refresh_token)]);
+  const ok = results.filter((r) => r.statusCode === 200);
+  assert.equal(ok.length, 1);
+  // The winner's successor survives the race…
+  assert.equal((await refreshGrant(idp.app, ok[0].json().refresh_token)).statusCode, 200);
+  // …but a replay after the window is still treated as theft.
+  idp.clock.advance(11);
+  assert.equal((await refreshGrant(idp.app, first.refresh_token)).statusCode, 400);
 });
 
 test('policy is re-evaluated on refresh: leaving the group ends the session', async () => {

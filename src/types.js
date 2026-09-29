@@ -33,6 +33,9 @@ export {};
  * @property {number} authCodeTtl
  * @property {boolean} trustProxy
  * @property {boolean} reevaluatePolicyOnRefresh
+ * @property {'offline_access' | 'always'} issueRefreshTokens When to issue a refresh token on code exchange.
+ * @property {number} refreshReuseGraceSeconds A rotated token replayed within this window only fails
+ *   (benign concurrent refresh) instead of revoking the grant. 0 = strict.
  * @property {RateLimits} rateLimits
  */
 

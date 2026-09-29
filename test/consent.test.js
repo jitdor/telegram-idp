@@ -39,6 +39,16 @@ test('revoking a grant kills refresh tokens and outstanding access tokens', asyn
   assert.equal((await idp.app.inject({ url: '/userinfo', headers: { authorization: `Bearer ${fresh.access_token}` } })).statusCode, 200);
 });
 
+test('consenting to a new scope does not invalidate tokens that do not use it', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx, { firstParty: true });
+  const narrow = await loginAndExchange(idp, { scope: 'openid' });
+  idp.clock.advance(5);
+  await loginAndExchange(idp, { scope: 'openid telegram' }); // grants telegram later
+  const info = await idp.app.inject({ url: '/userinfo', headers: { authorization: `Bearer ${narrow.access_token}` } });
+  assert.equal(info.statusCode, 200);
+});
+
 test('bot /apps lists grants and the revoke button withdraws consent', async () => {
   const idp = await createTestIdp();
   await addClient(idp.ctx, { firstParty: true });

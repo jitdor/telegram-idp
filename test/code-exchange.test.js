@@ -14,7 +14,7 @@ test('concurrent exchanges of one code: exactly one succeeds', async () => {
 test('replaying a used code revokes the tokens it produced', async () => {
   const idp = await createTestIdp();
   await addClient(idp.ctx);
-  const { code, verifier } = await login(idp);
+  const { code, verifier } = await login(idp, { scope: 'openid offline_access' });
   const tokens = (await exchangeCode(idp.app, { code, verifier })).json();
 
   const replay = await exchangeCode(idp.app, { code, verifier });
