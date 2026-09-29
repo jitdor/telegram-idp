@@ -1,81 +1,115 @@
 import { Bot, InlineKeyboard } from 'grammy';
-import { config } from './config.js';
-import { getAuthRequestByToken, approveAuthRequest, denyAuthRequest, hasConsent } from './oauth.js';
-import { evaluatePolicy } from './policy.js';
-import db from './db.js';
+import { escapeHtml as e } from './util.js';
 
-export const bot = new Bot(config.telegramBotToken);
+/** @typedef {import('./types.js').IdpContext} IdpContext */
 
-bot.command('start', async (ctx) => {
-  const payload = ctx.match;
-  if (payload && payload.startsWith('auth_')) {
-    const token = payload.slice(5);
-    const authRequest = getAuthRequestByToken(token);
-    if (!authRequest) {
-      return ctx.reply('❌ Invalid or expired login request.');
+const SCOPE_LABELS = {
+  openid: 'your Telegram-linked account id',
+  profile: 'your name, username and language',
+  telegram: 'your Telegram user id and Premium status',
+  offline_access: 'staying signed in',
+};
+
+/**
+ * grammY-free handlers over the OAuth service, so they can be unit tested
+ * with a fake `ctx` (anything with `from`, `match`, `reply`, …).
+ * @param {IdpContext} idp
+ */
+export function createBotHandlers(idp) {
+  const { oauth } = idp;
+
+  async function start(ctx) {
+    const payload = typeof ctx.match === 'string' ? ctx.match : '';
+    if (!payload.startsWith('auth_')) {
+      return ctx.reply('Welcome! Scan a sign-in QR code to log in to an app. Use /apps to see and revoke apps you have signed in to.');
     }
-
-    // Fetch client policy
-    const client = db.prepare('SELECT policy FROM oauth_clients WHERE client_id = ?').get(authRequest.client_id);
-    const policy = client?.policy ? JSON.parse(client.policy) : null;
-
-    // Evaluate policy
-    const result = await evaluatePolicy(policy, ctx.from, bot);
-    if (!result.pass) {
-      // Deny the auth request
-      denyAuthRequest(authRequest.id, result.reason || 'Policy evaluation failed');
-      return ctx.reply(`❌ You do not meet the requirements to sign in: ${result.reason || 'policy denied'}`);
-    }
-
-    // Look up internal user ID
-    let internalUser = db.prepare('SELECT * FROM users WHERE telegram_user_id = ?').get(ctx.from.id);
-    if (!internalUser) {
-      // User not yet in DB; they will be created upon approval
-      internalUser = { id: null };
-    }
-
-    // Determine if client is first-party and user has existing consent
-    const clientRow = db.prepare('SELECT is_first_party FROM oauth_clients WHERE client_id = ?').get(authRequest.client_id);
-    const isFirstParty = clientRow && clientRow.is_first_party === 1;
-    const existingConsent = isFirstParty && internalUser.id && hasConsent(internalUser.id, authRequest.client_id, authRequest.scope);
-
-    if (existingConsent) {
-      const approvedUser = await approveAuthRequest(authRequest.id, ctx.from);
-      if (approvedUser) {
-        await ctx.reply(`✅ Auto‑approved for trusted client **${authRequest.client_id}** (previous consent found). You can return to your browser.`);
-        return;
+    const outcome = await oauth.beginTelegramLogin(payload.slice(5), ctx.from);
+    switch (outcome.kind) {
+      case 'invalid':
+        return ctx.reply('❌ This sign-in request is invalid, expired, or was opened by another account.');
+      case 'denied':
+        return ctx.reply(
+          `❌ You do not meet the requirements to sign in to <b>${e(outcome.client.name)}</b>: ${e(outcome.reason)}`,
+          { parse_mode: 'HTML' });
+      case 'approved':
+        return ctx.reply(
+          `✅ Signed in to <b>${e(outcome.client.name)}</b> (you approved it before). You can return to your browser.`,
+          { parse_mode: 'HTML' });
+      case 'consent': {
+        const keyboard = new InlineKeyboard()
+          .text('✅ Approve', `approve:${outcome.authRequestId}`)
+          .text('❌ Deny', `deny:${outcome.authRequestId}`);
+        const who = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+        const scopes = outcome.scopes.map((s) => `• ${e(SCOPE_LABELS[s] || s)}`).join('\n');
+        return ctx.reply(
+          `<b>${e(outcome.client.name)}</b> wants to sign you in as ${e(who)}.\n\nIt will be able to see:\n${scopes}`,
+          { parse_mode: 'HTML', reply_markup: keyboard });
       }
-      return ctx.reply('❌ Unable to auto‑approve. Please try again.');
     }
-
-    // Policy passed – show consent
-    const keyboard = new InlineKeyboard()
-      .text('✅ Approve', `approve:${authRequest.id}`)
-      .text('❌ Deny', `deny:${authRequest.id}`);
-    await ctx.reply(
-      `Login request from **${authRequest.client_id}**\n\nAllow @${ctx.from.username || ctx.from.first_name} to sign in?`,
-      { parse_mode: 'Markdown', reply_markup: keyboard }
-    );
-  } else {
-    await ctx.reply('Welcome! Scan a QR code to sign in to third-party apps.');
   }
-});
 
-bot.on('callback_query:data', async (ctx) => {
-  const data = ctx.callbackQuery.data;
-  if (data.startsWith('approve:')) {
-    const id = data.slice(8);
-    const user = await approveAuthRequest(id, ctx.from);
-    if (user) {
-      await ctx.answerCallbackQuery({ text: 'Approved! Return to your browser.' });
-      await ctx.editMessageText('✅ Login approved. You can close this chat.');
+  async function callback(ctx) {
+    const data = String(ctx.callbackQuery?.data || '');
+    const sep = data.indexOf(':');
+    const action = sep > 0 ? data.slice(0, sep) : '';
+    const arg = data.slice(sep + 1);
+    if (action === 'approve') {
+      const ok = oauth.approveLogin(arg, ctx.from);
+      await ctx.answerCallbackQuery({ text: ok ? 'Approved! Return to your browser.' : 'This request is no longer valid.' });
+      if (ok) await ctx.editMessageText('✅ Sign-in approved. You can return to your browser.');
+    } else if (action === 'deny') {
+      const ok = oauth.denyLogin(arg, ctx.from);
+      await ctx.answerCallbackQuery({ text: ok ? 'Denied.' : 'This request is no longer valid.' });
+      if (ok) await ctx.editMessageText('❌ Sign-in denied.');
+    } else if (action === 'revoke') {
+      const ok = oauth.revokeGrant(ctx.from.id, arg);
+      await ctx.answerCallbackQuery({ text: ok ? 'Access revoked.' : 'Nothing to revoke.' });
+      if (ok) await ctx.editMessageText(`🔒 Access revoked for ${arg}. That app will need your approval again.`);
     } else {
-      await ctx.answerCallbackQuery({ text: 'This request is no longer valid.' });
+      await ctx.answerCallbackQuery();
     }
-  } else if (data.startsWith('deny:')) {
-    const id = data.slice(5);
-    const ok = denyAuthRequest(id);
-    await ctx.answerCallbackQuery({ text: ok ? 'Denied.' : 'Invalid request.' });
-    if (ok) await ctx.editMessageText('❌ Login denied.');
   }
-});
+
+  /** `/apps` — list clients the user has consented to, with revoke buttons. */
+  async function apps(ctx) {
+    const grants = oauth.listGrants(ctx.from.id);
+    if (grants.length === 0) return ctx.reply('You have not granted access to any apps.');
+    const keyboard = new InlineKeyboard();
+    const lines = grants.map((g) => {
+      // callback_data is limited to 64 bytes; long client ids fall back to /revoke.
+      if (Buffer.byteLength(`revoke:${g.client_id}`) <= 64) keyboard.text(`Revoke ${g.name}`, `revoke:${g.client_id}`).row();
+      return `• <b>${e(g.name)}</b> (<code>${e(g.client_id)}</code>): ${e(g.scopes)}`;
+    });
+    return ctx.reply(`Apps with access to your account:\n${lines.join('\n')}\n\nRevoke with the buttons or /revoke &lt;client_id&gt;.`,
+      { parse_mode: 'HTML', reply_markup: keyboard });
+  }
+
+  /** `/revoke <client_id>` */
+  async function revoke(ctx) {
+    const clientId = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+    if (!clientId) return ctx.reply('Usage: /revoke <client_id> (see /apps)');
+    const ok = oauth.revokeGrant(ctx.from.id, clientId);
+    return ctx.reply(ok ? `🔒 Access revoked for ${clientId}.` : `No access found for ${clientId}.`);
+  }
+
+  return { start, callback, apps, revoke };
+}
+
+/**
+ * Attach the handlers to a grammY bot.
+ * @param {import('grammy').Bot} bot
+ * @param {IdpContext} idp
+ */
+export function registerBotHandlers(bot, idp) {
+  const h = createBotHandlers(idp);
+  bot.command('start', h.start);
+  bot.command('apps', h.apps);
+  bot.command('revoke', h.revoke);
+  bot.on('callback_query:data', h.callback);
+  return bot;
+}
+
+/** @param {string} token */
+export function createTelegramBot(token) {
+  return new Bot(token);
+}

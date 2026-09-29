@@ -4,6 +4,9 @@ import { splitScopes } from './util.js';
 /** @typedef {import('./types.js').Client} Client */
 /** @typedef {import('./types.js').User} User */
 /** @typedef {import('./types.js').TelegramUser} TelegramUser */
+/** @typedef {import('./types.js').AuthRequestRow} AuthRequestRow */
+/** @typedef {import('./types.js').AuthCodeRow} AuthCodeRow */
+/** @typedef {import('./types.js').RefreshTokenRow} RefreshTokenRow */
 /** @typedef {ReturnType<typeof createSqliteStore>} Store */
 
 /**
@@ -120,16 +123,16 @@ export function createSqliteStore(db) {
           r.codeChallenge, r.codeChallengeMethod, r.browserSessionId, r.createdAt, r.expiresAt);
     },
 
-    /** @param {string} id */
+    /** @param {string} id @returns {AuthRequestRow | null} */
     getAuthRequest(id) {
       if (typeof id !== 'string') return null;
-      return q('SELECT * FROM auth_requests WHERE id = ?').get(id) ?? null;
+      return /** @type {any} */ (q('SELECT * FROM auth_requests WHERE id = ?').get(id)) ?? null;
     },
 
-    /** @param {string} tokenHash @param {number} now */
+    /** @param {string} tokenHash @param {number} now @returns {AuthRequestRow | null} */
     getPendingAuthRequestByTokenHash(tokenHash, now) {
-      return q(`SELECT * FROM auth_requests WHERE token_hash = ? AND status = 'pending' AND expires_at > ?`)
-        .get(tokenHash, now) ?? null;
+      return /** @type {any} */ (q(`SELECT * FROM auth_requests WHERE token_hash = ? AND status = 'pending' AND expires_at > ?`)
+        .get(tokenHash, now)) ?? null;
     },
 
     /**
@@ -179,14 +182,16 @@ export function createSqliteStore(db) {
           c.codeChallengeMethod, c.scope, c.nonce ?? null, c.authTime, c.createdAt, c.expiresAt);
     },
 
+    /** @returns {AuthCodeRow | null} */
     getAuthorizationCode(code) {
       if (typeof code !== 'string') return null;
-      return q('SELECT * FROM authorization_codes WHERE code = ?').get(code) ?? null;
+      return /** @type {any} */ (q('SELECT * FROM authorization_codes WHERE code = ?').get(code)) ?? null;
     },
 
+    /** @returns {{ code: string } | null} */
     getUnusedCodeForAuthRequest(authRequestId, now) {
-      return q(`SELECT code FROM authorization_codes
-          WHERE auth_request_id = ? AND used_at IS NULL AND expires_at > ?`).get(authRequestId, now) ?? null;
+      return /** @type {any} */ (q(`SELECT code FROM authorization_codes
+          WHERE auth_request_id = ? AND used_at IS NULL AND expires_at > ?`).get(authRequestId, now)) ?? null;
     },
 
     /** Atomically consume a code. @returns {boolean} true for exactly one caller */
@@ -210,8 +215,9 @@ export function createSqliteStore(db) {
         .run(t.tokenHash, t.familyId, t.userId, t.clientId, t.scope, t.authTime ?? null, t.createdAt, t.expiresAt);
     },
 
+    /** @returns {RefreshTokenRow | null} */
     getRefreshTokenByHash(tokenHash) {
-      return q('SELECT * FROM refresh_tokens WHERE token_hash = ?').get(tokenHash) ?? null;
+      return /** @type {any} */ (q('SELECT * FROM refresh_tokens WHERE token_hash = ?').get(tokenHash)) ?? null;
     },
 
     /**

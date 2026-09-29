@@ -29,7 +29,7 @@
         stopped = true;
         setStatus('This sign-in request expired. Please start again.');
       }
-    } catch (e) {
+    } catch {
       // Network hiccup: keep polling.
     }
   }

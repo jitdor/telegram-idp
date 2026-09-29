@@ -1,6 +1,14 @@
 import { parseDuration } from './util.js';
 
 /** @typedef {import('./types.js').IdpConfig} IdpConfig */
+/**
+ * @typedef {Partial<Omit<IdpConfig, 'rateLimits' | 'accessTokenTtl' | 'idTokenTtl' | 'refreshTokenTtl'
+ *   | 'authRequestTtl' | 'authCodeTtl'>> & {
+ *   rateLimits?: Partial<import('./types.js').RateLimits>,
+ *   accessTokenTtl?: number | string, idTokenTtl?: number | string, refreshTokenTtl?: number | string,
+ *   authRequestTtl?: number | string, authCodeTtl?: number | string,
+ * }} ConfigInput
+ */
 
 /** Scopes this IdP knows how to honour. Clients may be restricted to a subset. */
 export const SUPPORTED_SCOPES = Object.freeze(['openid', 'profile', 'telegram', 'offline_access']);
@@ -31,7 +39,8 @@ const DEFAULTS = {
 /**
  * Build an immutable config from explicit values (no environment access).
  * This is what library embedders should use.
- * @param {Partial<IdpConfig>} [values]
+ * Durations may be given as seconds or strings like "15m".
+ * @param {ConfigInput} [values]
  * @returns {Readonly<IdpConfig>}
  */
 export function defineConfig(values = {}) {

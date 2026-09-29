@@ -1,42 +1,77 @@
-import { test, before } from 'node:test';
-import assert from 'node:assert';
-import { createTestDb, createTestClient, createTestUser } from './helpers.js';
-import { hasConsent, approveAuthRequest, createAuthRequest, setDb } from '../src/oauth.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createBotHandlers } from '../src/bot.js';
+import { addClient, createTestIdp, login, loginAndExchange, pkce, postForm, refreshGrant, startLogin, tgUser } from './helpers.js';
 
-let db, client, user;
+test('first-party clients skip the prompt after the first consent; third-party never do', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx, { clientId: 'first', firstParty: true });
+  await addClient(idp.ctx, { clientId: 'third' });
 
-before(() => {
-  db = createTestDb();
-  setDb(db); // <-- ensure OAuth functions use the test DB
-  client = createTestClient(db, { is_first_party: 1 });
-  user = createTestUser(db);
+  assert.equal((await login(idp, { clientId: 'first' })).outcome.kind, 'consent');
+  assert.equal((await login(idp, { clientId: 'first' })).outcome.kind, 'approved');
+  // Asking for more than was consented to prompts again.
+  assert.equal((await login(idp, { clientId: 'first', scope: 'openid offline_access' })).outcome.kind, 'consent');
+
+  assert.equal((await login(idp, { clientId: 'third' })).outcome.kind, 'consent');
+  assert.equal((await login(idp, { clientId: 'third' })).outcome.kind, 'consent');
 });
 
-test('consent storage and retrieval uses internal user ID', () => {
-  const authReq = createAuthRequest({
-    clientId: client.client_id,
-    redirectUri: 'https://client.example.com/callback',
-    state: 'test-state',
-    scope: 'openid profile telegram',
-    nonce: null,
-    codeChallenge: 'test-challenge',
-    codeChallengeMethod: 'S256',
-    browserSessionId: 'test-session',
+test('revoking a grant kills refresh tokens and outstanding access tokens', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx);
+  const tokens = await loginAndExchange(idp);
+
+  assert.deepEqual(idp.ctx.oauth.listGrants(1001).map((g) => g.client_id), ['test-client']);
+  assert.equal(idp.ctx.oauth.revokeGrant(1001, 'test-client'), true);
+  assert.deepEqual(idp.ctx.oauth.listGrants(1001), []);
+
+  assert.equal((await refreshGrant(idp.app, tokens.refresh_token)).statusCode, 400);
+  const info = await idp.app.inject({ url: '/userinfo', headers: { authorization: `Bearer ${tokens.access_token}` } });
+  assert.equal(info.statusCode, 401);
+  const intro = await postForm(idp.app, '/introspect', { token: tokens.access_token, client_id: 'test-client' });
+  assert.equal(intro.json().active, false);
+
+  // Consenting again does not resurrect tokens issued before the revocation.
+  idp.clock.advance(1);
+  const fresh = await loginAndExchange(idp);
+  assert.equal((await idp.app.inject({ url: '/userinfo', headers: { authorization: `Bearer ${tokens.access_token}` } })).statusCode, 401);
+  assert.equal((await idp.app.inject({ url: '/userinfo', headers: { authorization: `Bearer ${fresh.access_token}` } })).statusCode, 200);
+});
+
+test('bot /apps lists grants and the revoke button withdraws consent', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx, { firstParty: true });
+  await login(idp);
+  const bot = createBotHandlers(idp.ctx);
+
+  const replies = [];
+  await bot.apps({ from: tgUser(), reply: async (text, extra) => replies.push({ text, extra }) });
+  assert.match(replies[0].text, /Test Client/);
+  const data = replies[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.equal(data, 'revoke:test-client');
+
+  let answered;
+  await bot.callback({
+    from: tgUser(), callbackQuery: { data },
+    answerCallbackQuery: async (a) => { answered = a; }, editMessageText: async () => {},
   });
+  assert.equal(answered.text, 'Access revoked.');
 
-  const telegramUser = {
-    id: user.telegram_user_id,
-    username: user.telegram_username,
-    first_name: user.first_name,
-    last_name: user.last_name,
-    photo_url: user.photo_url,
-  };
-  const approvedUser = approveAuthRequest(authReq.id, telegramUser);
-  assert.ok(approvedUser);
+  // The first-party shortcut is gone: the next login prompts again.
+  const { token } = await startLogin(idp.app, { code_challenge: pkce().challenge });
+  assert.equal((await idp.ctx.oauth.beginTelegramLogin(token, tgUser())).kind, 'consent');
+});
 
-  const has = hasConsent(user.id, client.client_id, 'openid');
-  assert.ok(has);
-
-  const wrongHas = hasConsent(user.telegram_user_id, client.client_id, 'openid');
-  assert.equal(wrongHas, false);
+test('bot /revoke command', async () => {
+  const idp = await createTestIdp();
+  await addClient(idp.ctx);
+  await login(idp);
+  const bot = createBotHandlers(idp.ctx);
+  const replies = [];
+  const ctx = (match) => ({ from: tgUser(), match, reply: async (t) => replies.push(t) });
+  await bot.revoke(ctx('test-client'));
+  await bot.revoke(ctx('test-client'));
+  assert.match(replies[0], /revoked/);
+  assert.match(replies[1], /No access/);
 });

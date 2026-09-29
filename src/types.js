@@ -64,6 +64,62 @@ export {};
  */
 
 /**
+ * @typedef {object} AuthRequestRow
+ * @property {string} id
+ * @property {string} token_hash
+ * @property {string} client_id
+ * @property {string} redirect_uri
+ * @property {string | null} state
+ * @property {string} scope
+ * @property {string | null} nonce
+ * @property {string} code_challenge
+ * @property {string} code_challenge_method
+ * @property {'pending' | 'approved' | 'denied'} status
+ * @property {number | null} telegram_user_id
+ * @property {number | null} user_id
+ * @property {string} browser_session_id
+ * @property {string | null} error
+ * @property {string | null} error_description
+ * @property {number} created_at
+ * @property {number} expires_at
+ */
+
+/**
+ * @typedef {object} AuthCodeRow
+ * @property {string} code
+ * @property {string} auth_request_id
+ * @property {number} user_id
+ * @property {string} client_id
+ * @property {string} redirect_uri
+ * @property {string} code_challenge
+ * @property {string} code_challenge_method
+ * @property {string} scope
+ * @property {string | null} nonce
+ * @property {number} auth_time
+ * @property {number} created_at
+ * @property {number} expires_at
+ * @property {number | null} used_at
+ * @property {string | null} refresh_family_id
+ * @property {string | null} access_token_jti
+ * @property {number | null} access_token_exp
+ */
+
+/**
+ * @typedef {object} RefreshTokenRow
+ * @property {number} id
+ * @property {string} token_hash
+ * @property {string} family_id
+ * @property {number} user_id
+ * @property {string} client_id
+ * @property {string} scope
+ * @property {number | null} auth_time
+ * @property {number} created_at
+ * @property {number} expires_at
+ * @property {number | null} rotated_at
+ * @property {number | null} revoked_at
+ */
+
+/**
  * @typedef {object} Client
  * @property {string} clientId
  * @property {string} name

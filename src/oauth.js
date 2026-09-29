@@ -312,15 +312,16 @@ export function createOAuthService(ctx) {
     }
     if (typeof clientId !== 'string' || !clientId) throw invalidClient();
     if (secret !== undefined && typeof secret !== 'string') throw invalidClient();
+    const presentedSecret = /** @type {string | undefined} */ (secret);
 
     const client = store.getClient(clientId);
     if (!client) throw invalidClient();
     if (client.secretHash) {
-      if (!secret) throw invalidClient();
-      const { ok, needsRehash } = await verifySecret(secret, client.secretHash);
+      if (!presentedSecret) throw invalidClient();
+      const { ok, needsRehash } = await verifySecret(presentedSecret, client.secretHash);
       if (!ok) throw invalidClient();
-      if (needsRehash) store.setClientSecretHash(client.clientId, await hashSecret(secret));
-    } else if (secret) {
+      if (needsRehash) store.setClientSecretHash(client.clientId, await hashSecret(presentedSecret));
+    } else if (presentedSecret) {
       throw invalidClient('This is a public client; it must not send a secret');
     }
     return client;
