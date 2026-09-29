@@ -275,9 +275,11 @@ WantedBy=multi-user.target
 ## Development
 
 ```bash
+npm run dev       # start the server, restarting on file changes
 npm test          # node:test suite (each test builds its own in-memory IdP)
 npm run lint      # ESLint
 npm run typecheck # tsc --checkJs over JSDoc types (src/types.js)
+npm run check     # lint, typecheck and test in one go
 ```
 
 CI runs all three on Node 22.13, 22 and 24.
